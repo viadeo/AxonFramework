@@ -123,6 +123,8 @@
         <slf4j.version>1.6.1</slf4j.version>
         <spring.version>3.1.2.RELEASE</spring.version>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    	<com.viadeo.mvn.proxy.deployurl>http://deploy.mvn.viadeo.com</com.viadeo.mvn.proxy.deployurl>  
+    	<com.viadeo.mvn.sites.deploy.url>scp://sites.mvn.viadeo.com/usr/local/maven_sites</com.viadeo.mvn.sites.deploy.url>          
     </properties>
 
     <dependencies>
@@ -329,18 +331,22 @@
     </build>
 
     <!-- deploy and release configuration -->
-    <distributionManagement>
-        <snapshotRepository>
-            <id>sonatype</id>
-            <url>http://oss.sonatype.org/content/repositories/snapshots</url>
-            <uniqueVersion>true</uniqueVersion>
-        </snapshotRepository>
-        <repository>
-            <id>sonatype</id>
-            <url>http://oss.sonatype.org/service/local/staging/deploy/maven2</url>
-            <uniqueVersion>false</uniqueVersion>
-        </repository>
-    </distributionManagement>
+  <distributionManagement> 
+    <repository> 
+      <id>releases</id>  
+      <name>viadeo-releases</name>  
+      <url>${com.viadeo.mvn.proxy.deployurl}/content/repositories/releases</url> 
+    </repository>  
+    <snapshotRepository> 
+      <id>snapshots</id>  
+      <name>viadeo-snapshots</name>  
+      <url>${com.viadeo.mvn.proxy.deployurl}/content/repositories/snapshots</url> 
+    </snapshotRepository>  
+    <site> 
+      <id>viadeo-sites-repo</id>  
+      <url>${com.viadeo.mvn.sites.deploy.url}</url> 
+    </site> 
+  </distributionManagement>  
     <scm>
         <connection>scm:git:git://github.com/AxonFramework/AxonFramework.git</connection>
         <developerConnection>scm:git:git@github.com:AxonFramework/AxonFramework.git</developerConnection>
