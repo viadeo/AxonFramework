@@ -36,11 +36,13 @@ import org.axonframework.domain.MetaData;
 import org.axonframework.domain.SimpleDomainEventStream;
 import org.axonframework.eventhandling.EventBus;
 import org.axonframework.eventhandling.EventListener;
+import org.axonframework.eventsourcing.AggregateFactory;
 import org.axonframework.eventsourcing.EventSourcedAggregateRoot;
 import org.axonframework.eventsourcing.EventSourcingRepository;
 import org.axonframework.eventstore.EventStore;
 import org.axonframework.eventstore.EventStoreException;
 import org.axonframework.repository.AggregateNotFoundException;
+import org.axonframework.repository.Repository;
 import org.axonframework.unitofwork.DefaultUnitOfWork;
 import org.axonframework.unitofwork.UnitOfWork;
 import org.axonframework.unitofwork.UnitOfWorkListenerAdapter;
@@ -78,7 +80,7 @@ public class GivenWhenThenTestFixture<T extends EventSourcedAggregateRoot>
 
     private static final Logger logger = LoggerFactory.getLogger(GivenWhenThenTestFixture.class);
 
-    private EventSourcingRepository<T> repository;
+    private Repository<T> repository;
     private SimpleCommandBus commandBus;
     private EventBus eventBus;
     private Object aggregateIdentifier;
@@ -105,18 +107,24 @@ public class GivenWhenThenTestFixture<T extends EventSourcedAggregateRoot>
         commandBus = new SimpleCommandBus();
         eventStore = new RecordingEventStore();
         clearGivenWhenState();
-        repository = new EventSourcingRepository<T>(aggregateType);
-        repository.setEventStore(eventStore);
-        repository.setEventBus(eventBus);
+        final EventSourcingRepository<T> eventSourcingRepository = new EventSourcingRepository<T>(aggregateType);
+        eventSourcingRepository.setEventStore(eventStore);
+        eventSourcingRepository.setEventBus(eventBus);
+        repository = new IdentifierValidatingRepository<T>(eventSourcingRepository);
         this.aggregateType = aggregateType;
     }
 
     @Override
     public FixtureConfiguration<T> registerRepository(EventSourcingRepository<T> eventSourcingRepository) {
-        this.repository = eventSourcingRepository;
+        this.repository = new IdentifierValidatingRepository<T>(eventSourcingRepository);
         eventSourcingRepository.setEventBus(eventBus);
         eventSourcingRepository.setEventStore(eventStore);
         return this;
+    }
+
+    @Override
+    public FixtureConfiguration<T> registerAggregateFactory(AggregateFactory<T> aggregateFactory) {
+        return registerRepository(new EventSourcingRepository<T>(aggregateFactory));
     }
 
     @Override
@@ -200,14 +208,7 @@ public class GivenWhenThenTestFixture<T extends EventSourcedAggregateRoot>
 
     @Override
     public ResultValidator when(Object command) {
-        finalizeConfiguration();
-        ResultValidatorImpl resultValidator = new ResultValidatorImpl(storedEvents, publishedEvents);
-        commandBus.setHandlerInterceptors(Collections.singletonList(new AggregateRegisteringInterceptor()));
-
-        commandBus.dispatch(GenericCommandMessage.asCommandMessage(command), resultValidator);
-
-        detectIllegalStateChanges();
-        return resultValidator;
+        return when(command, MetaData.emptyInstance());
     }
 
     @Override
@@ -219,9 +220,10 @@ public class GivenWhenThenTestFixture<T extends EventSourcedAggregateRoot>
         commandBus.dispatch(GenericCommandMessage.asCommandMessage(command).andMetaData(metaData), resultValidator);
 
         detectIllegalStateChanges();
+        resultValidator.assertValidRecording();
         return resultValidator;
-    }    
-    
+    }
+
     private void finalizeConfiguration() {
         registerInjectableResources();
         if (!explicitCommandHandlersSet) {
@@ -330,7 +332,7 @@ public class GivenWhenThenTestFixture<T extends EventSourcedAggregateRoot>
     }
 
     @Override
-    public EventSourcingRepository<T> getRepository() {
+    public Repository<T> getRepository() {
         return repository;
     }
 
@@ -474,6 +476,44 @@ public class GivenWhenThenTestFixture<T extends EventSourcedAggregateRoot>
             int result = workingObject.hashCode();
             result = 31 * result + eventSourceObject.hashCode();
             return result;
+        }
+    }
+
+    private static class IdentifierValidatingRepository<T extends AggregateRoot> implements Repository<T> {
+
+        private final Repository<T> delegate;
+
+        public IdentifierValidatingRepository(Repository<T> delegate) {
+            this.delegate = delegate;
+        }
+
+        @Override
+        public T load(Object aggregateIdentifier, Long expectedVersion) {
+            T aggregate = delegate.load(aggregateIdentifier, expectedVersion);
+            validateIdentifier(aggregateIdentifier, aggregate);
+            return aggregate;
+        }
+
+        @Override
+        public T load(Object aggregateIdentifier) {
+            T aggregate = delegate.load(aggregateIdentifier, null);
+            validateIdentifier(aggregateIdentifier, aggregate);
+            return aggregate;
+        }
+
+        private void validateIdentifier(Object aggregateIdentifier, T aggregate) {
+            if (aggregateIdentifier != null && !aggregateIdentifier.equals(aggregate.getIdentifier())) {
+                throw new AssertionError(String.format(
+                        "The aggregate used in this fixture was initialized with an identifier different than "
+                                + "the one used to load it. Loaded [%s], but actual identifier is [%s].\n"
+                                + "Make sure the identifier passed in the Command matches that of the given Events.",
+                        aggregateIdentifier, aggregate.getIdentifier()));
+            }
+        }
+
+        @Override
+        public void add(T aggregate) {
+            delegate.add(aggregate);
         }
     }
 }

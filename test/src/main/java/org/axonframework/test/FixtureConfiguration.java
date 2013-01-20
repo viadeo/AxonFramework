@@ -19,9 +19,11 @@ package org.axonframework.test;
 import org.axonframework.commandhandling.CommandBus;
 import org.axonframework.commandhandling.CommandHandler;
 import org.axonframework.eventhandling.EventBus;
+import org.axonframework.eventsourcing.AggregateFactory;
 import org.axonframework.eventsourcing.EventSourcedAggregateRoot;
 import org.axonframework.eventsourcing.EventSourcingRepository;
 import org.axonframework.eventstore.EventStore;
+import org.axonframework.repository.Repository;
 
 import java.util.List;
 
@@ -80,11 +82,29 @@ public interface FixtureConfiguration<T extends EventSourcedAggregateRoot> {
     /**
      * Registers an arbitrary event sourcing <code>repository</code> with the fixture. The repository will be wired
      * with an Event Store and Event Bus implementation suitable for this test fixture.
+     * <p/>
+     * Should not be used in combination with {@link
+     * #registerAggregateFactory(org.axonframework.eventsourcing.AggregateFactory)}, as that will overwrite any
+     * repository previously registered.
      *
      * @param repository The repository to use in the test case
      * @return the current FixtureConfiguration, for fluent interfacing
      */
     FixtureConfiguration<T> registerRepository(EventSourcingRepository<T> repository);
+
+    /**
+     * Registers the given <code>aggregateFactory</code> with the fixture. The repository used by the fixture will use
+     * the given factory to create new aggregate instances. Defaults to an Aggregate Factory that uses the no-arg
+     * constructor to create new instances.
+     * <p/>
+     * Should not be used in combination with {@link
+     * #registerRepository(org.axonframework.eventsourcing.EventSourcingRepository)}, as that will overwrite any
+     * aggregate factory previously registered.
+     *
+     * @param aggregateFactory The Aggregate Factory to create empty aggregates with
+     * @return the current FixtureConfiguration, for fluent interfacing
+     */
+    FixtureConfiguration<T> registerAggregateFactory(AggregateFactory<T> aggregateFactory);
 
     /**
      * Registers an <code>annotatedCommandHandler</code> with this fixture. This will register this command handler
@@ -181,8 +201,7 @@ public interface FixtureConfiguration<T extends EventSourcedAggregateRoot> {
     /**
      * Returns the event bus used by this fixture. The event bus is provided for wiring purposes only, for example to
      * allow command handlers to publish events other than Domain Events. Events published on the returned event bus
-     * are
-     * recorded an evaluated in the {@link ResultValidator} operations.
+     * are recorded an evaluated in the {@link ResultValidator} operations.
      *
      * @return the event bus used by this fixture
      */
@@ -197,12 +216,11 @@ public interface FixtureConfiguration<T extends EventSourcedAggregateRoot> {
 
     /**
      * Returns the repository used by this fixture. This repository is provided for wiring purposes only. The
-     * repository
-     * is configured to use the fixture's event store to load events.
+     * repository is configured to use the fixture's event store to load events.
      *
      * @return the repository used by this fixture
      */
-    EventSourcingRepository<T> getRepository();
+    Repository<T> getRepository();
 
     /**
      * Sets whether or not the fixture should detect and report state changes that occur outside of Event Handler
