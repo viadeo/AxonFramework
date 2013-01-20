@@ -49,6 +49,7 @@ public class AnnotationCommandHandlerBeanPostProcessor extends AbstractAnnotatio
 
     @Override
     protected AnnotationCommandHandlerAdapter initializeAdapterFor(Object bean) {
+        ensureCommandBusInitialized();
         return AnnotationCommandHandlerAdapter.subscribe(bean, commandBus);
     }
 
@@ -56,8 +57,7 @@ public class AnnotationCommandHandlerBeanPostProcessor extends AbstractAnnotatio
      * {@inheritDoc}
      */
     @SuppressWarnings({"unchecked"})
-    @Override
-    public void afterPropertiesSet() throws Exception {
+    private void ensureCommandBusInitialized() {
         // if no CommandBus is set, find one in the application context
         if (commandBus == null) {
             Map<String, CommandBus> beans = getApplicationContext().getBeansOfType(CommandBus.class);
@@ -66,8 +66,9 @@ public class AnnotationCommandHandlerBeanPostProcessor extends AbstractAnnotatio
                         "If no specific CommandBus is provided, the application context must "
                                 + "contain exactly one bean of type CommandBus. The current application context has: "
                                 + beans.size());
+            } else {
+                this.commandBus = beans.entrySet().iterator().next().getValue();
             }
-            this.commandBus = beans.entrySet().iterator().next().getValue();
         }
     }
 

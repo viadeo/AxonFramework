@@ -18,6 +18,7 @@ package org.axonframework.saga.annotation;
 
 import com.lmax.disruptor.BlockingWaitStrategy;
 import com.lmax.disruptor.EventTranslator;
+import com.lmax.disruptor.ExceptionHandler;
 import com.lmax.disruptor.MultiThreadedClaimStrategy;
 import com.lmax.disruptor.WaitStrategy;
 import com.lmax.disruptor.dsl.Disruptor;
@@ -25,14 +26,16 @@ import org.axonframework.common.Assert;
 import org.axonframework.common.Subscribable;
 import org.axonframework.domain.EventMessage;
 import org.axonframework.eventhandling.EventBus;
-import org.axonframework.unitofwork.DefaultUnitOfWorkFactory;
-import org.axonframework.unitofwork.TransactionManager;
 import org.axonframework.saga.GenericSagaFactory;
 import org.axonframework.saga.SagaFactory;
 import org.axonframework.saga.SagaManager;
 import org.axonframework.saga.SagaRepository;
 import org.axonframework.saga.repository.inmemory.InMemorySagaRepository;
+import org.axonframework.unitofwork.DefaultUnitOfWorkFactory;
+import org.axonframework.unitofwork.TransactionManager;
 import org.axonframework.unitofwork.UnitOfWorkFactory;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.Executor;
 import java.util.concurrent.ExecutorService;
@@ -69,6 +72,7 @@ public class AsyncAnnotatedSagaManager implements SagaManager, Subscribable {
     private int processorCount = DEFAULT_PROCESSOR_COUNT;
     private int bufferSize = DEFAULT_BUFFER_SIZE;
     private WaitStrategy waitStrategy = DEFAULT_WAIT_STRATEGY;
+    private SagaManagerStatus sagaManagerStatus = new SagaManagerStatus();
 
     /**
      * Initializes an Asynchronous Saga Manager using default values for the given <code>sagaTypes</code> to listen to
@@ -94,11 +98,16 @@ public class AsyncAnnotatedSagaManager implements SagaManager, Subscribable {
      */
     public synchronized void start() {
         if (disruptor == null) {
+            sagaManagerStatus.setStatus(true);
             disruptor = new Disruptor<AsyncSagaProcessingEvent>(new AsyncSagaProcessingEvent.Factory(), executor,
                                                                 new MultiThreadedClaimStrategy(bufferSize),
                                                                 waitStrategy);
+            disruptor.handleExceptionsWith(new LoggingExceptionHandler());
             disruptor.handleEventsWith(AsyncSagaEventProcessor.createInstances(sagaRepository,
-                                                                               unitOfWorkFactory, processorCount));
+                                                                               unitOfWorkFactory, processorCount,
+                                                                               disruptor.getRingBuffer(),
+                                                                               sagaManagerStatus));
+
             disruptor.start();
         }
         subscribe();
@@ -112,6 +121,7 @@ public class AsyncAnnotatedSagaManager implements SagaManager, Subscribable {
      * If the Saga Manager was already stopped, nothing happens.
      */
     public synchronized void stop() {
+        sagaManagerStatus.setStatus(false);
         unsubscribe();
         if (disruptor != null) {
             disruptor.shutdown();
@@ -135,22 +145,20 @@ public class AsyncAnnotatedSagaManager implements SagaManager, Subscribable {
     @SuppressWarnings({"unchecked"})
     @Override
     public void handle(final EventMessage event) {
-        for (final SagaMethodMessageHandlerInspector annotationInspector : sagaAnnotationInspectors) {
-            final SagaMethodMessageHandler handler = annotationInspector.getMessageHandler(event);
+        for (final SagaMethodMessageHandlerInspector inspector : sagaAnnotationInspectors) {
+            final SagaMethodMessageHandler handler = inspector.getMessageHandler(event);
             if (handler.isHandlerAvailable()) {
                 final AbstractAnnotatedSaga newSagaInstance;
                 switch (handler.getCreationPolicy()) {
                     case ALWAYS:
                     case IF_NONE_FOUND:
-                        newSagaInstance = (AbstractAnnotatedSaga) sagaFactory.createSaga(annotationInspector
-                                                                                                 .getSagaType());
+                        newSagaInstance = (AbstractAnnotatedSaga) sagaFactory.createSaga(inspector.getSagaType());
                         break;
                     default:
                         newSagaInstance = null;
                         break;
                 }
-                disruptor.publishEvent(new SagaProcessingEventTranslator(event, annotationInspector, handler,
-                                                                         newSagaInstance));
+                disruptor.publishEvent(new SagaProcessingEventTranslator(event, inspector, handler, newSagaInstance));
             }
         }
     }
@@ -161,14 +169,14 @@ public class AsyncAnnotatedSagaManager implements SagaManager, Subscribable {
     }
 
     private static final class SagaProcessingEventTranslator implements EventTranslator<AsyncSagaProcessingEvent> {
+
         private final EventMessage event;
         private final SagaMethodMessageHandlerInspector annotationInspector;
         private final SagaMethodMessageHandler handler;
         private final AbstractAnnotatedSaga newSagaInstance;
 
         private SagaProcessingEventTranslator(EventMessage event, SagaMethodMessageHandlerInspector annotationInspector,
-                                              SagaMethodMessageHandler handler,
-                                              AbstractAnnotatedSaga newSagaInstance) {
+                                              SagaMethodMessageHandler handler, AbstractAnnotatedSaga newSagaInstance) {
             this.event = event;
             this.annotationInspector = annotationInspector;
             this.handler = handler;
@@ -178,11 +186,7 @@ public class AsyncAnnotatedSagaManager implements SagaManager, Subscribable {
         @SuppressWarnings({"unchecked"})
         @Override
         public void translateTo(AsyncSagaProcessingEvent entry, long sequence) {
-            entry.clear();
-            entry.setPublishedEvent(event);
-            entry.setSagaType(annotationInspector.getSagaType());
-            entry.setHandler(handler);
-            entry.setNewSaga(newSagaInstance);
+            entry.reset(event, annotationInspector.getSagaType(), handler, newSagaInstance);
         }
     }
 
@@ -284,5 +288,47 @@ public class AsyncAnnotatedSagaManager implements SagaManager, Subscribable {
     public synchronized void setWaitStrategy(WaitStrategy waitStrategy) {
         Assert.state(disruptor == null, "Cannot set waitStrategy when SagaManager has started");
         this.waitStrategy = waitStrategy;
+    }
+
+    private static final class LoggingExceptionHandler implements ExceptionHandler {
+
+        private static final Logger logger = LoggerFactory.getLogger(LoggingExceptionHandler.class);
+
+        @Override
+        public void handleEventException(Throwable ex, long sequence, Object event) {
+            logger.warn("A fatal exception occurred while processing an Event for a Saga. "
+                                + "Processing will continue with the next Event", ex);
+        }
+
+        @Override
+        public void handleOnStartException(Throwable ex) {
+            logger.warn("An exception occurred while starting the AsyncAnnotatedSagaManager.", ex);
+        }
+
+        @Override
+        public void handleOnShutdownException(Throwable ex) {
+            logger.warn("An exception occurred while shutting down the AsyncAnnotatedSagaManager.", ex);
+        }
+    }
+
+    /**
+     * Exposes the running state of the SagaManager.
+     */
+    static class SagaManagerStatus {
+
+        private volatile boolean isRunning;
+
+        private void setStatus(boolean running) {
+            isRunning = running;
+        }
+
+        /**
+         * Indicates whether the SagaManager that provided this instance is (still) running.
+         *
+         * @return <code>true</code> if the SagaManager is running, otherwise <code>false</code>
+         */
+        public boolean isRunning() {
+            return isRunning;
+        }
     }
 }

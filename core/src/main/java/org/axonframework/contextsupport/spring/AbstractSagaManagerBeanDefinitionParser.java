@@ -26,8 +26,14 @@ import org.springframework.beans.factory.config.RuntimeBeanReference;
 import org.springframework.beans.factory.support.AbstractBeanDefinition;
 import org.springframework.beans.factory.support.GenericBeanDefinition;
 import org.springframework.beans.factory.xml.ParserContext;
+import org.springframework.util.StringUtils;
 import org.springframework.util.xml.DomUtils;
 import org.w3c.dom.Element;
+
+import java.util.ArrayList;
+import java.util.List;
+
+import static org.axonframework.contextsupport.spring.AutowiredBean.createAutowiredBean;
 
 /**
  * Abstract SagaManager parser that parses common properties for all SagaManager implementations.
@@ -37,11 +43,13 @@ import org.w3c.dom.Element;
  */
 public abstract class AbstractSagaManagerBeanDefinitionParser {
 
-    private Object resourceInjector;
+    private static final String DEFAULT_SAGA_REPOSITORY_ID = "sagaRepository$$DefaultInMemory";
     private static final String RESOURCE_INJECTOR_ATTRIBUTE = "resource-injector";
     private static final String SAGA_REPOSITORY_ATTRIBUTE = "saga-repository";
     private static final String EVENT_BUS_ATTRIBUTE = "event-bus";
     private static final String SAGA_FACTORY_ATTRIBUTE = "saga-factory";
+
+    private Object resourceInjector;
 
     /**
      * Parses elements for shared SagaManager logic.
@@ -131,8 +139,8 @@ public abstract class AbstractSagaManagerBeanDefinitionParser {
         } else {
             GenericBeanDefinition bean = new GenericBeanDefinition();
             bean.setBeanClass(InMemorySagaRepository.class);
-            context.getRegistry().registerBeanDefinition("sagaRepository", bean);
-            registerSagaRepository(new RuntimeBeanReference("sagaRepository"), sagaManagerDefinition);
+            context.getRegistry().registerBeanDefinition(DEFAULT_SAGA_REPOSITORY_ID, bean);
+            registerSagaRepository(new RuntimeBeanReference(DEFAULT_SAGA_REPOSITORY_ID), sagaManagerDefinition);
         }
     }
 
@@ -156,14 +164,21 @@ public abstract class AbstractSagaManagerBeanDefinitionParser {
 
     private void parseTypesElement(Element element, GenericBeanDefinition sagaManagerDefinition) {
         Element childNode = DomUtils.getChildElementByTagName(element, "types");
-        registerTypes(childNode.getTextContent().split(","), sagaManagerDefinition);
+        final String[] types = childNode.getTextContent().split("[,\\n]");
+        List<String> filteredTypes = new ArrayList<String>();
+        for (String type : types) {
+            if (StringUtils.hasText(type)) {
+                filteredTypes.add(type.trim());
+            }
+        }
+        registerTypes(filteredTypes.toArray(new String[filteredTypes.size()]), sagaManagerDefinition);
     }
 
     private void parseEventBusAttribute(Element element, GenericBeanDefinition beanDefinition) {
         if (element.hasAttribute(EVENT_BUS_ATTRIBUTE)) {
             registerEventBus(new RuntimeBeanReference(element.getAttribute(EVENT_BUS_ATTRIBUTE)), beanDefinition);
         } else {
-            registerEventBus(new AutowiredBean(EventBus.class), beanDefinition);
+            registerEventBus(createAutowiredBean(EventBus.class), beanDefinition);
         }
     }
 

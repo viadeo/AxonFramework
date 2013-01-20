@@ -59,4 +59,5 @@ public @interface SagaEventHandler {
      * the value given by {@link #associationProperty()}.
      */
     String keyName() default "";
+
 }

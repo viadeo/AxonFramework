@@ -16,18 +16,23 @@
 
 package org.axonframework.saga.annotation;
 
+import org.apache.log4j.Level;
+import org.apache.log4j.Logger;
+import org.axonframework.common.AxonConfigurationException;
 import org.axonframework.domain.EventMessage;
 import org.axonframework.eventhandling.EventBus;
 import org.axonframework.saga.Saga;
 import org.axonframework.saga.repository.inmemory.InMemorySagaRepository;
 import org.junit.*;
+import org.mockito.internal.stubbing.answers.*;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.axonframework.domain.GenericEventMessage.asEventMessage;
 import static org.junit.Assert.*;
@@ -38,10 +43,24 @@ import static org.mockito.Mockito.*;
  */
 public class AsyncAnnotatedSagaManagerTest {
 
+    private static final Logger logger = Logger.getLogger(AsyncSagaEventProcessor.class);
+    private static Level oldLevel;
+
     private AsyncAnnotatedSagaManager testSubject;
     private EventBus eventBus;
     private AsyncAnnotatedSagaManagerTest.StubInMemorySagaRepository sagaRepository;
     private ExecutorService executorService;
+
+    @BeforeClass
+    public static void disableLogging() {
+        oldLevel = logger.getLevel();
+        logger.setLevel(Level.OFF);
+    }
+
+    @AfterClass
+    public static void enableLogging() {
+        logger.setLevel(oldLevel);
+    }
 
     @SuppressWarnings("unchecked")
     @Before
@@ -56,6 +75,11 @@ public class AsyncAnnotatedSagaManagerTest {
         testSubject.setBufferSize(64);
     }
 
+    @After
+    public void tearDown() {
+        testSubject.stop();
+    }
+
     @Test
     public void testSingleSagaLifeCycle() throws InterruptedException {
         testSubject.start();
@@ -66,6 +90,70 @@ public class AsyncAnnotatedSagaManagerTest {
         testSubject.stop();
         executorService.shutdown();
         assertTrue("Service refused to stop in 1 second", executorService.awaitTermination(1, TimeUnit.SECONDS));
+        assertEquals("Incorrect known saga count", 1, sagaRepository.getKnownSagas());
+        assertEquals("Incorrect live saga count", 0, sagaRepository.getLiveSagas());
+    }
+
+    @Test
+    public void testSingleSagaLifeCycle_FailedPersistence() throws InterruptedException {
+        final StubInMemorySagaRepository spy = spy(sagaRepository);
+        testSubject.setSagaRepository(spy);
+        Exception failure = new RuntimeException("Mockexception");
+        doThrow(failure).doAnswer(new CallsRealMethods()).when(spy).add(isA(Saga.class));
+        doThrow(failure).doAnswer(new CallsRealMethods()).when(spy).commit(isA(Saga.class));
+        testSubject.start();
+        assertEquals(0, sagaRepository.getKnownSagas());
+        for (EventMessage message : createSimpleLifeCycle("one", "two", true)) {
+            testSubject.handle(message);
+        }
+        Thread.sleep(100);
+        testSubject.stop();
+        executorService.shutdown();
+        assertTrue("Service refused to stop in 10 seconds", executorService.awaitTermination(10, TimeUnit.SECONDS));
+        assertEquals("Incorrect known saga count", 1, sagaRepository.getKnownSagas());
+        assertEquals("Incorrect live saga count", 0, sagaRepository.getLiveSagas());
+    }
+
+   @Test
+    public void testSingleSagaLifeCycle_NonTransientFailure() throws InterruptedException {
+        final StubInMemorySagaRepository spy = spy(sagaRepository);
+        testSubject.setSagaRepository(spy);
+        Exception failure = new RuntimeException("Mockexception",
+                                                 new AxonConfigurationException("Faking a wrong config"));
+        doThrow(failure).when(spy).add(isA(Saga.class));
+        doThrow(failure).when(spy).commit(isA(Saga.class));
+        testSubject.start();
+        assertEquals(0, sagaRepository.getKnownSagas());
+        for (EventMessage message : createSimpleLifeCycle("one", "two", true)) {
+            testSubject.handle(message);
+        }
+        testSubject.stop();
+        executorService.shutdown();
+        assertTrue("Service refused to stop in 1 seconds", executorService.awaitTermination(1, TimeUnit.SECONDS));
+        assertEquals("Incorrect known saga count", 0, sagaRepository.getKnownSagas());
+        assertEquals("Incorrect live saga count", 0, sagaRepository.getLiveSagas());
+    }
+
+    @Test
+    public void testSingleSagaLifeCycle_FinalAttemptOnClose() throws InterruptedException {
+        final StubInMemorySagaRepository spy = spy(sagaRepository);
+        testSubject.setSagaRepository(spy);
+        Exception failure = new RuntimeException("Mock Exception");
+        doThrow(failure).when(spy).commit(isA(Saga.class));
+        doThrow(failure).when(spy).add(isA(Saga.class));
+        testSubject.start();
+        assertEquals(0, sagaRepository.getKnownSagas());
+        for (EventMessage message : createSimpleLifeCycle("one", "two", true)) {
+            testSubject.handle(message);
+        }
+        Thread.sleep(500);
+        // to make sure at least one failed call was made...
+//        verify(spy, atLeastOnce()).add(isA(Saga.class));
+        doCallRealMethod().when(spy).commit(isA(Saga.class));
+        doCallRealMethod().when(spy).add(isA(Saga.class));
+        testSubject.stop();
+        executorService.shutdown();
+        assertTrue("Service refused to stop in 1 seconds", executorService.awaitTermination(1, TimeUnit.SECONDS));
         assertEquals("Incorrect known saga count", 1, sagaRepository.getKnownSagas());
         assertEquals("Incorrect live saga count", 0, sagaRepository.getLiveSagas());
     }
@@ -85,6 +173,52 @@ public class AsyncAnnotatedSagaManagerTest {
         assertTrue("Service refused to stop in 1 second", executorService.awaitTermination(1, TimeUnit.SECONDS));
         assertEquals("Incorrect known saga count", 1000, sagaRepository.getKnownSagas());
         assertEquals("Incorrect live saga count", 0, sagaRepository.getLiveSagas());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testNullAssociationIgnoresEvent() throws InterruptedException {
+        testSubject = new AsyncAnnotatedSagaManager(eventBus, StubAsyncSaga.class, AnotherStubAsyncSaga.class,
+                                                    ThirdStubAsyncSaga.class);
+        testSubject.setSagaRepository(sagaRepository);
+        executorService = Executors.newCachedThreadPool();
+        testSubject.setExecutor(executorService);
+        testSubject.setProcessorCount(3);
+        testSubject.setBufferSize(64);
+
+        testSubject.start();
+
+        testSubject.handle(asEventMessage(new ForceCreateNewEvent(null)));
+        testSubject.handle(asEventMessage(new OptionallyCreateNewEvent(null)));
+
+        testSubject.stop();
+        executorService.shutdown();
+        assertTrue("Service refused to stop in 1 second", executorService.awaitTermination(1, TimeUnit.SECONDS));
+        assertEquals("Incorrect known saga count", 0, sagaRepository.getKnownSagas());
+        assertEquals("Incorrect live saga count", 0, sagaRepository.getLiveSagas());
+    }
+
+    @SuppressWarnings("unchecked")
+    @Test
+    public void testExceptionsFromHandlerAreIgnored() throws InterruptedException {
+        testSubject = new AsyncAnnotatedSagaManager(eventBus, StubAsyncSaga.class);
+        testSubject.setSagaRepository(sagaRepository);
+        executorService = Executors.newCachedThreadPool();
+        testSubject.setExecutor(executorService);
+        testSubject.setProcessorCount(3);
+        testSubject.setBufferSize(64);
+
+        testSubject.start();
+
+        testSubject.handle(asEventMessage(new ForceCreateNewEvent("test")));
+        testSubject.handle(asEventMessage(new GenerateErrorOnHandlingEvent("test")));
+
+        testSubject.stop();
+        executorService.shutdown();
+        assertTrue("Service refused to stop in 1 second", executorService.awaitTermination(1, TimeUnit.SECONDS));
+        assertEquals("Incorrect known saga count", 1, sagaRepository.getKnownSagas());
+        assertEquals("Incorrect live saga count", 1, sagaRepository.getLiveSagas());
+        logger.setLevel(oldLevel);
     }
 
     @Test
@@ -121,13 +255,9 @@ public class AsyncAnnotatedSagaManagerTest {
         publicationList.add(asEventMessage(new UpdateEvent(firstAssociation)));
         publicationList.add(asEventMessage(new AddAssociationEvent(firstAssociation, newAssociation)));
         publicationList.add(asEventMessage(new OptionallyCreateNewEvent(newAssociation)));
-        publicationList.add(asEventMessage(new DeleteEvent(firstAssociation)));
+        publicationList.add(asEventMessage(new DeleteEvent(newAssociation)));
+        // this exception should never be thrown, as the previous event ends the saga
         return publicationList;
-    }
-
-    @After
-    public void tearDown() {
-        testSubject.stop();
     }
 
     public static class ThirdStubAsyncSaga extends AnotherStubAsyncSaga {
@@ -140,32 +270,28 @@ public class AsyncAnnotatedSagaManagerTest {
 
     public static class StubAsyncSaga extends AbstractAnnotatedSaga {
 
-        private int optionallyNewInvocations;
-        private int forceNewInvocations;
-        private int updateInvocations;
-        private int deleteInvocations;
-
         @StartSaga(forceNew = false)
         @SagaEventHandler(associationProperty = "association")
         public void handleOptionallyCreateNew(OptionallyCreateNewEvent event) {
-//            optionallyNewInvocations++;
         }
 
         @StartSaga(forceNew = true)
         @SagaEventHandler(associationProperty = "association")
         public void handleOptionallyCreateNew(ForceCreateNewEvent event) {
-//            optionallyNewInvocations++;
         }
 
         @SagaEventHandler(associationProperty = "association")
         public void handleAddAssociation(AddAssociationEvent event) {
-//            updateInvocations++;
             associateWith("association", event.getNewAssociation());
         }
 
         @SagaEventHandler(associationProperty = "association")
         public void handleUpdate(UpdateEvent event) {
-//            updateInvocations++;
+        }
+
+        @SagaEventHandler(associationProperty = "association")
+        public void createError(GenerateErrorOnHandlingEvent event) {
+            throw new RuntimeException("Stub");
         }
 
         @EndSaga
@@ -203,6 +329,13 @@ public class AsyncAnnotatedSagaManagerTest {
         }
     }
 
+    private static class GenerateErrorOnHandlingEvent extends AbstractSagaTestEvent {
+
+        private GenerateErrorOnHandlingEvent(String association) {
+            super(association);
+        }
+    }
+
     private static class AddAssociationEvent extends AbstractSagaTestEvent {
 
         private final String newAssociation;
@@ -230,32 +363,33 @@ public class AsyncAnnotatedSagaManagerTest {
         }
     }
 
-    private class StubInMemorySagaRepository extends InMemorySagaRepository {
+    public static class StubInMemorySagaRepository extends InMemorySagaRepository {
 
-        private AtomicInteger knownSagas = new AtomicInteger();
-        private AtomicInteger liveSagas = new AtomicInteger();
+        private Set<String> knownSagas = new ConcurrentSkipListSet<String>();
+        private Set<String> liveSagas = new ConcurrentSkipListSet<String>();
 
         @Override
         public void commit(Saga saga) {
+            assertTrue(knownSagas.contains(saga.getSagaIdentifier()));
             if (!saga.isActive()) {
-                liveSagas.decrementAndGet();
+                liveSagas.remove(saga.getSagaIdentifier());
             }
             super.commit(saga);
         }
 
         @Override
         public void add(Saga saga) {
-            knownSagas.incrementAndGet();
-            liveSagas.incrementAndGet();
+            knownSagas.add(saga.getSagaIdentifier());
+            liveSagas.add(saga.getSagaIdentifier());
             super.add(saga);
         }
 
         public int getKnownSagas() {
-            return knownSagas.get();
+            return knownSagas.size();
         }
 
         public int getLiveSagas() {
-            return liveSagas.get();
+            return liveSagas.size();
         }
     }
 }

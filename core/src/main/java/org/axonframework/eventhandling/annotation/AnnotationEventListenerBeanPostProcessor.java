@@ -51,6 +51,7 @@ public class AnnotationEventListenerBeanPostProcessor extends AbstractAnnotation
      */
     @Override
     protected AnnotationEventListenerAdapter initializeAdapterFor(Object bean) {
+        ensureEventBusInitialized();
         return AnnotationEventListenerAdapter.subscribe(bean, eventBus);
     }
 
@@ -61,12 +62,8 @@ public class AnnotationEventListenerBeanPostProcessor extends AbstractAnnotation
                 && hasEventHandlerMethod(targetClass);
     }
 
-    /**
-     * {@inheritDoc}
-     */
     @SuppressWarnings({"unchecked"})
-    @Override
-    public void afterPropertiesSet() throws Exception {
+    private void ensureEventBusInitialized() {
         // if no EventBus is set, find one in the application context
         if (eventBus == null) {
             Map<String, EventBus> beans = getApplicationContext().getBeansOfType(EventBus.class);
@@ -75,8 +72,9 @@ public class AnnotationEventListenerBeanPostProcessor extends AbstractAnnotation
                         "If no specific EventBus is provided, the application context must "
                                 + "contain exactly one bean of type EventBus. The current application context has: "
                                 + beans.size());
+            } else {
+                this.eventBus = beans.entrySet().iterator().next().getValue();
             }
-            this.eventBus = beans.entrySet().iterator().next().getValue();
         }
     }
 
